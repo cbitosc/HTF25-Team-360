@@ -1,0 +1,435 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>EchoVault — Offline Time Capsule</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  :root{--bg:#fbfbfd;--card:#fff;--muted:#666;--accent:#6a5af9}
+  body{font-family:Inter,system-ui,Segoe UI,Arial; margin:18px; background:var(--bg); color:#111}
+  header{display:flex;align-items:center;gap:16px}
+  h1{margin:0;font-size:20px}
+  .container{max-width:1000px;margin:12px auto}
+  .card{background:var(--card);box-shadow:0 6px 18px rgba(30,30,60,0.06);padding:14px;border-radius:12px;margin:12px 0}
+  label{font-weight:600;font-size:13px}
+  input,select,textarea,button{width:100%;padding:8px;margin-top:6px;border-radius:8px;border:1px solid #ddd;box-sizing:border-box}
+  .row{display:flex;gap:12px}
+  .col{flex:1}
+  .small{width:auto;display:inline-block}
+  #capsuleList .item{padding:10px;border-radius:8px;border:1px dashed #eee;margin:8px 0;display:flex;justify-content:space-between;align-items:center}
+  .meta{font-size:12px;color:var(--muted)}
+  .mood{font-size:18px;margin-right:8px}
+  .pill{display:inline-block;padding:6px 10px;background:#f2f2ff;border-radius:999px;color:var(--accent);font-weight:600}
+  .controls{display:flex;gap:8px;flex-wrap:wrap}
+  .btn{cursor:pointer;border:0;padding:8px 12px;border-radius:8px;background:var(--accent);color:white}
+  .btn.secondary{background:#eee;color:#333}
+  .timeline{display:flex;gap:10px;overflow:auto;padding:8px}
+  .node{min-width:120px;border-radius:10px;padding:10px;background:#fff;box-shadow:0 3px 8px rgba(0,0,0,0.04);text-align:center}
+  footer{font-size:12px;color:var(--muted);margin-top:18px}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>EchoVault — Offline Time Capsule</h1>
+    <span class="pill">Offline-first</span>
+  </header>
+
+  <section class="card" id="createCard">
+    <h3>Create Capsule</h3>
+    <label>Type</label>
+    <select id="capsuleType">
+      <option value="reflection">Personal Reflection</option>
+      <option value="goal">Goal Capsule</option>
+      <option value="family">Family / Legacy</option>
+      <option value="environment">Environment / Photo Compare</option>
+    </select>
+
+    <div style="margin-top:8px">
+      <label>Title</label>
+      <input id="title" placeholder="e.g., To Future Me — Exam Days" />
+      <label>Content (text)</label>
+      <textarea id="text" rows="5" placeholder="Write your message..."></textarea>
+
+      <label>Attach Image (optional)</label>
+      <input type="file" id="imageFile" accept="image/*" />
+
+      <label>Record Audio Message (optional)</label>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <button id="recordBtn" class="btn secondary small">Start Recording</button>
+        <button id="stopBtn" class="btn secondary small" disabled>Stop</button>
+        <span id="recStatus" class="meta">No recording</span>
+      </div>
+
+      <label>Unlock date & time</label>
+      <input id="unlockAt" type="datetime-local" />
+
+      <label>Passphrase (keep safe)</label>
+      <input id="pass" type="password" placeholder="Enter passphrase to encrypt this capsule" />
+
+      <label>Location tag (optional)</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="location" placeholder="(click fetch) or leave empty" />
+        <button id="fetchLoc" class="btn secondary small">Fetch</button>
+      </div>
+
+      <div style="margin-top:10px" class="controls">
+        <button id="createBtn" class="btn">Create Capsule</button>
+        <button id="exportAll" class="btn secondary">Export All (backup)</button>
+        <button id="importAllBtn" class="btn secondary">Import Backup</button>
+        <input type="file" id="importFile" style="display:none" />
+      </div>
+
+      <div id="createMsg" class="meta" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Timeline & Stats</h3>
+    <div id="timeline" class="timeline"></div>
+    <div style="margin-top:10px">
+      <strong>Badges:</strong> <span id="badges" class="meta"></span>
+      &nbsp; | &nbsp; <strong>Total capsules:</strong> <span id="totalCaps" class="meta">0</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>My Capsules</h3>
+    <div id="capsuleList"></div>
+    <div class="meta" style="margin-top:8px">You can <b>export</b> a capsule (encrypted file) and share it — the recipient imports it and opens it offline (if unlock date is reached and passphrase known).</div>
+  </section>
+
+  <section class="card">
+    <h3>Import / Open Capsule File (single capsule)</h3>
+    <input type="file" id="singleImport" />
+    <div id="importMsg" class="meta"></div>
+  </section>
+
+  <footer>Built for offline use. Save your passphrase — there is no server to recover it.</footer>
+</div>
+
+<script>
+/* -----------------------
+   Offline EchoVault App
+   Single-file, no libs
+   ----------------------- */
+
+// Simple IndexedDB wrapper
+const DB_NAME = 'echovault_v1';
+const STORE = 'capsules';
+
+function openDB(){
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
+    };
+    r.onsuccess = e => resolve(e.target.result);
+    r.onerror = e => reject(e.target.error);
+  });
+}
+
+async function idbPut(obj){
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE,'readwrite');
+    tx.objectStore(STORE).put(obj);
+    tx.oncomplete = () => res(true);
+    tx.onerror = e => rej(e.target.error);
+  });
+}
+async function idbGetAll(){
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE,'readonly');
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => res(req.result || []);
+    req.onerror = e => rej(e.target.error);
+  });
+}
+async function idbGet(id){
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const req = db.transaction(STORE,'readonly').objectStore(STORE).get(id);
+    req.onsuccess = () => res(req.result);
+    req.onerror = e => rej(e.target.error);
+  });
+}
+async function idbDelete(id){
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE,'readwrite');
+    tx.objectStore(STORE).delete(id);
+    tx.oncomplete = () => res(true);
+    tx.onerror = e => rej(e.target.error);
+  });
+}
+
+/* Crypto helpers (AES-GCM via Web Crypto) */
+async function deriveKey(pass, saltBytes){
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: saltBytes, iterations: 200000, hash:'SHA-256' }, base, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+  return key;
+}
+function bufToB64(buf){ const bytes = new Uint8Array(buf); let s=''; for(let i=0;i<bytes.length;i++) s+=String.fromCharCode(bytes[i]); return btoa(s); }
+function b64ToBuf(b64){ const s = atob(b64); const u = new Uint8Array(s.length); for(let i=0;i<s.length;i++) u[i]=s.charCodeAt(i); return u.buffer; }
+
+async function encryptPayload(plainJSON, pass){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pass, salt);
+  const enc = new TextEncoder();
+  const ct = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, enc.encode(JSON.stringify(plainJSON)));
+  return { ciphertext: bufToB64(ct), iv: bufToB64(iv), salt: bufToB64(salt) };
+}
+async function decryptPayload(cipherB64, pass, ivB64, saltB64){
+  const iv = new Uint8Array(b64ToBuf(ivB64));
+  const salt = new Uint8Array(b64ToBuf(saltB64));
+  const key = await deriveKey(pass, salt);
+  const ct = b64ToBuf(cipherB64);
+  const dec = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, key, ct);
+  return JSON.parse(new TextDecoder().decode(dec));
+}
+
+/* UI references */
+const el = id => document.getElementById(id);
+const createBtn = el('createBtn'), recordBtn = el('recordBtn'), stopBtn = el('stopBtn');
+const recStatus = el('recStatus');
+let mediaRecorder, audioChunks = [], recordedB64 = null;
+
+/* Simple sentiment (offline keyword-based) */
+const POS = ['happy','joy','excited','hope','grateful','good','love','energi','confident','proud','achieve'];
+const NEG = ['sad','angry','depress','anxious','fear','scared','worry','lonely','stress','tired'];
+
+function detectMood(text){
+  const t = (text || '').toLowerCase();
+  let score=0;
+  POS.forEach(w => { if(t.includes(w)) score++; });
+  NEG.forEach(w => { if(t.includes(w)) score--; });
+  if(score>0) return {mood:'positive',icon:'😊'};
+  if(score<0) return {mood:'negative',icon:'😔'};
+  return {mood:'neutral',icon:'😐'};
+}
+
+/* Recording audio */
+recordBtn.addEventListener('click', async ()=>{
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.onstop = async () => {
+      const blob = new Blob(audioChunks, { type:'audio/webm' });
+      const reader = new FileReader();
+      reader.onload = () => {
+        const b64 = reader.result.split(',')[1];
+        recordedB64 = { b64, type: blob.type, size: blob.size };
+        recStatus.textContent = Recorded (${Math.round(blob.size/1024)} KB);
+      };
+      reader.readAsDataURL(blob);
+    };
+    mediaRecorder.start();
+    recStatus.textContent = 'Recording...';
+    recordBtn.disabled = true;
+    stopBtn.disabled = false;
+  }catch(e){ alert('Could not access microphone: ' + (e.message || e)); }
+});
+stopBtn.addEventListener('click', ()=>{
+  if(mediaRecorder && mediaRecorder.state==='recording') mediaRecorder.stop();
+  recordBtn.disabled = false;
+  stopBtn.disabled = true;
+});
+
+/* Create capsule */
+createBtn.addEventListener('click', async ()=>{
+  const type = el('capsuleType').value;
+  const title = el('title').value || 'Untitled';
+  const text = el('text').value || '';
+  const unlockAt = el('unlockAt').value;
+  const pass = el('pass').value;
+  const loc = el('location').value || null;
+  const imgFile = el('imageFile').files[0];
+
+  if(!unlockAt || !pass || (!text && !imgFile && !recordedB64)){
+    alert('Provide an unlock date, passphrase, and at least one content (text, image, or audio).');
+    return;
+  }
+
+  el('createMsg').textContent = 'Preparing...';
+
+  // prepare payload
+  let imageData = null;
+  if(imgFile){
+    const r = new FileReader();
+    const p = await new Promise(resolve => {
+      r.onload = ()=> resolve(r.result.split(',')[1]);
+      r.readAsDataURL(imgFile);
+    });
+    imageData = { b64: p, type: imgFile.type, name: imgFile.name };
+  }
+
+  const plain = { title, text, image: imageData, audio: recordedB64, type, createdAt: new Date().toISOString(), loc };
+  const enc = await encryptPayload(plain, pass);
+  // capsule object to store locally: includes ciphertext, iv, salt, unlockAt, meta
+  const id = 'cap_' + Date.now() + '_' + Math.random().toString(36).slice(2,8);
+  const capsule = { id, ciphertext: enc.ciphertext, iv: enc.iv, salt: enc.salt, unlockAt: new Date(unlockAt).toISOString(), meta: { title, type }, createdAt: new Date().toISOString(), mood: detectMood(text) , badges: [] };
+
+  // award basic badge for creating
+  capsule.badges.push('Creator');
+
+  await idbPut(capsule);
+  recordedB64 = null; el('imageFile').value = ''; el('text').value = ''; el('title').value = '';
+  el('createMsg').textContent = Capsule created locally. ID: ${id};
+  await refreshUI();
+});
+
+/* Refresh UI (list & timeline & badges) */
+async function refreshUI(){
+  const all = await idbGetAll();
+  el('totalCaps').textContent = all.length;
+  // timeline nodes (sorted by date)
+  const t = el('timeline'); t.innerHTML = '';
+  const sorted = all.slice().sort((a,b)=> new Date(a.createdAt)-new Date(b.createdAt));
+  sorted.forEach(c => {
+    const node = document.createElement('div'); node.className='node';
+    node.innerHTML = `<div style="font-size:12px" class="meta">${new Date(c.createdAt).toLocaleDateString()}</div>
+                      <div style="margin-top:6px;font-weight:700">${escapeHtml(c.meta.title || '')}</div>
+                      <div class="meta" style="margin-top:6px">${escapeHtml(c.meta.type || '')}</div>
+                      <div style="margin-top:8px">${(c.mood && c.mood.icon) || '😐'}</div>
+                      <div style="margin-top:8px"><button class="btn secondary small" onclick="viewCapsule('${c.id}')">Open</button></div>`;
+    t.appendChild(node);
+  });
+
+  // list
+  const list = el('capsuleList'); list.innerHTML = '';
+  all.sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt)).forEach(c => {
+    const item = document.createElement('div'); item.className='item';
+    const left = document.createElement('div');
+    left.innerHTML = <div style="font-weight:700">${escapeHtml(c.meta.title || '')}</div><div class="meta">Unlocks: ${new Date(c.unlockAt).toLocaleString()}</div>;
+    const right = document.createElement('div');
+    const openBtn = document.createElement('button'); openBtn.textContent = 'Open'; openBtn.className='btn secondary small';
+    openBtn.onclick = ()=> viewCapsule(c.id);
+    const expBtn = document.createElement('button'); expBtn.textContent='Export'; expBtn.className='btn secondary small'; expBtn.onclick = ()=> exportCapsule(c.id);
+    const delBtn = document.createElement('button'); delBtn.textContent='Delete'; delBtn.className='btn small'; delBtn.onclick = async ()=> { if(confirm('Delete capsule?')) { await idbDelete(c.id); refreshUI(); } };
+    right.appendChild(openBtn); right.appendChild(expBtn); right.appendChild(delBtn);
+    item.appendChild(left); item.appendChild(right);
+    list.appendChild(item);
+  });
+
+  // badges (simple)
+  const badgesSet = new Set();
+  all.forEach(c=> (c.badges||[]).forEach(b=> badgesSet.add(b)));
+  el('badges').textContent = Array.from(badgesSet).join(', ') || '—';
+}
+window.refreshUI = refreshUI; // expose for inline buttons
+
+/* View capsule (decrypt if unlocked) */
+async function viewCapsule(id){
+  const cap = await idbGet(id);
+  if(!cap){ alert('Capsule not found'); return; }
+  const now = new Date();
+  if(now < new Date(cap.unlockAt)) { alert('Capsule is not yet unlocked. Unlock at: ' + new Date(cap.unlockAt).toLocaleString()); return; }
+  const pass = prompt('Enter passphrase to decrypt this capsule:');
+  if(!pass) return;
+  try{
+    const plain = await decryptPayload(cap.ciphertext, pass, cap.iv, cap.salt);
+    // show modal-like (simple)
+    const win = window.open('', '_blank', 'width=600,height=600,scrollbars=yes');
+    const html = [];
+    html.push(<h2>${escapeHtml(plain.title || '')}</h2>);
+    if(plain.text) html.push(<div style="white-space:pre-wrap">${escapeHtml(plain.text)}</div>);
+    if(plain.image) html.push(<div><img style="max-width:100%;margin-top:10px" src="data:${plain.image.type};base64,${plain.image.b64}" /></div>);
+    if(plain.audio) html.push(<div style="margin-top:10px"><audio controls src="data:${plain.audio.type};base64,${plain.audio.b64}"></audio></div>);
+    const moodSummary = (cap.mood && cap.mood.mood) ? <p><b>Mood at creation:</b> ${escapeHtml(cap.mood.icon || '')} (${escapeHtml(cap.mood.mood || '')})</p> : '';
+    html.push(<hr/>${moodSummary});
+    html.push(<button onclick="window.speechSynthesis.speak(new SpeechSynthesisUtterance(document.body.innerText))">Read Aloud</button>);
+    win.document.open();
+    win.document.write(html.join(''));
+    win.document.close();
+    win.document.title = plain.title || 'Capsule';
+    // award a badge for opening
+    cap.badges = cap.badges || [];
+    if(!cap.badges.includes('Opened')) cap.badges.push('Opened');
+    await idbPut(cap);
+    refreshUI();
+  }catch(e){
+    alert('Decryption failed. Wrong passphrase or corrupted data.');
+  }
+}
+function escapeHtml(s){ if(!s) return ''; return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+
+/* Export single capsule as file (encrypted) */
+async function exportCapsule(id){
+  const cap = await idbGet(id);
+  if(!cap) return alert('Not found');
+  const name = (cap.meta && cap.meta.title ? cap.meta.title.replace(/\s+/g,'_') : id) + '.evc.json';
+  downloadFile(JSON.stringify(cap, null, 2), name, 'application/json');
+}
+
+/* Export All (backup) */
+el('exportAll').addEventListener('click', async ()=>{
+  const all = await idbGetAll();
+  const blob = JSON.stringify({ exportedAt: new Date().toISOString(), data: all }, null, 2);
+  downloadFile(blob, 'echovault_backup.json', 'application/json');
+});
+
+/* Import Backup */
+el('importAllBtn').addEventListener('click', ()=> el('importFile').click());
+el('importFile').addEventListener('change', async (ev)=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const txt = await f.text();
+  try{
+    const obj = JSON.parse(txt);
+    const arr = obj.data || obj;
+    // insert each capsule (overwrite safe)
+    for(const c of arr) await idbPut(c);
+    alert('Imported ' + arr.length + ' capsules');
+    refreshUI();
+  }catch(e){ alert('Invalid backup file'); }
+});
+
+/* Import single capsule file */
+el('singleImport').addEventListener('change', async (ev)=>{
+  const f = ev.target.files[0];
+  if(!f) return;
+  try{
+    const txt = await f.text();
+    const cap = JSON.parse(txt);
+    if(!cap.id || !cap.ciphertext) return alert('Not a valid capsule file');
+    await idbPut(cap);
+    el('importMsg').textContent = 'Imported capsule: ' + (cap.meta && cap.meta.title ? cap.meta.title : cap.id);
+    refreshUI();
+  }catch(e){ el('importMsg').textContent = 'Import failed: ' + (e.message || e); }
+});
+
+/* Fetch geolocation */
+el('fetchLoc').addEventListener('click', async ()=>{
+  if(!navigator.geolocation) return alert('Geolocation not supported');
+  const btn = el('fetchLoc');
+  btn.textContent = 'Fetching...';
+  navigator.geolocation.getCurrentPosition(pos=>{
+    el('location').value = ${pos.coords.latitude.toFixed(5)},${pos.coords.longitude.toFixed(5)};
+    btn.textContent = 'Fetch';
+  }, err=>{
+    btn.textContent = 'Fetch';
+    alert('Could not get location: ' + err.message);
+  });
+});
+
+/* Utility: download file */
+function downloadFile(text, filename, type){
+  const blob = new Blob([text], { type: type || 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+
+/* Init */
+(async function init(){ await refreshUI(); })();
+
+</script>
+</body>
+</html>
